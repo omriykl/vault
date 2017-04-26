@@ -42,6 +42,8 @@ struct catalog
 	struct fileMetaData* files;
 };
 
+
+
 int createVault(char* filename,ssize_t sizeInBytes)
 {
 	struct catalog *c;
@@ -73,7 +75,7 @@ int createVault(char* filename,ssize_t sizeInBytes)
 
 	data = (char*) malloc(dataSize);
 
-	fd = open(filename,O_RDWR|O_CREAT|O_TRUNC,0777);
+	fd = open(filename,O_RDWR|O_CREAT|O_TRUNC,0644);
 	if (fd < 0)
 	{
 		printf("Error opening file: %s\n", strerror(errno));
@@ -319,7 +321,7 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 	c->files[c->numOfFiles -1].block1 = startOffset;
 	c->files[c->numOfFiles -1].block1Len = fileStat.st_size;
 	c->files[c->numOfFiles -1].insertion = tv.tv_sec;
-	strcpy(c->files[c->numOfFiles -1].name,fileToAdd);
+	strcpy(c->files[c->numOfFiles -1].name,basename(fileToAdd));
 	c->files[c->numOfFiles -1].protection = fileStat.st_mode;
 	c->files[c->numOfFiles -1].size = fileStat.st_size;
 
@@ -343,6 +345,88 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 	close(fd);
 
 	return 0;
+
+}
+
+int fetchFileFromVault(char* vaultFile, struct fileMetaData file)
+{
+	int vfd, fd,len;
+	ssize_t readBytes = 0;
+	ssize_t bufferSize = 1024;
+	char buffer[1024];
+
+	vfd = open(vaultFile,O_RDONLY);
+	if (vfd < 0)
+	{
+		printf("Error opening vault file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	fd = open(file.name,O_RDWR|O_CREAT|O_TRUNC,0644);
+	if (fd < 0)
+	{
+		printf("Error opening file to write to: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + file.block1 +(BORDERS_SIZE/2),SEEK_SET);
+
+	while (readBytes < file.block1Len)
+	{
+		if (file.block1Len - readBytes < bufferSize)
+			len = read(vfd,buffer,file.block1Len - readBytes);
+		else
+			len = read(vfd,buffer,bufferSize);
+		if (len < 0)
+			return -1;
+		if (write(fd,buffer,len) < 0)
+			return -1;
+		readBytes += len;
+	}
+
+	if (file.block2Len > 0)
+	{
+		readBytes = 0;
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + file.block2 +(BORDERS_SIZE/2),SEEK_SET);
+
+		while (readBytes < file.block2Len)
+		{
+			if (file.block2Len - readBytes < bufferSize)
+				len = read(vfd,buffer,file.block2Len - readBytes);
+			else
+				len = read(vfd,buffer,bufferSize);
+			if (len < 0)
+				return -1;
+			if (write(fd,buffer,len) < 0)
+				return -1;
+			readBytes += len;
+		}
+	}
+
+	if (file.block3Len > 0)
+	{
+		readBytes = 0;
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + file.block3 +(BORDERS_SIZE/2),SEEK_SET);
+
+		while (readBytes < file.block3Len)
+		{
+			if (file.block3Len - readBytes < bufferSize)
+				len = read(vfd,buffer,file.block3Len - readBytes);
+			else
+				len = read(vfd,buffer,bufferSize);
+			if (len < 0)
+				return -1;
+			if (write(fd,buffer,len) < 0)
+				return -1;
+			readBytes += len;
+		}
+	}
+
+	close(fd);
+	close(vfd);
+
+	return 0;
+
 
 }
 
@@ -415,6 +499,45 @@ int main(int argc, char** argv)
 		printf("File added!\n");
 		return 0;
 
+	}
+	else if (strcmp(argv[2],"fetch") == 0)
+	{
+		struct catalog *cat;
+		int i;
+
+		if (argc != 4)
+		{
+			printf("Invalid parameters for fetch operation!\n");
+			return -1;
+		}
+
+		if (getVaultFromFile(argv[1],&cat) < 0)
+		{
+			return -1;
+		}
+
+		if (cat->numOfFiles == 0)
+		{
+			printf("File %s was not found!\n",argv[3]);
+			return -1;
+		}
+
+		for (i=0;i<cat->numOfFiles;i++)
+		{
+			if (strcmp(argv[3],cat->files[i].name) == 0)
+			{
+				if (fetchFileFromVault(argv[1],cat->files[i]) < 0)
+				{
+					printf("error fetching file.\n");
+					return -1;
+				}
+				printf("%s created.\n",argv[3]);
+				return 0;
+			}
+		}
+
+		printf("File %s was not found!\n",argv[3]);
+		return -1;
 	}
 
 	struct catalog *cat;
