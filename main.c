@@ -235,9 +235,82 @@ long long getBytesFromStr(char* str)
 		return -1;
 }
 
+int findSpace1Block(char* vaultFile,struct stat fileStat,struct catalog* cat)
+{
+	int vfd,cur=0,len,i,j,inFile=0;
+	char buffer[1024];
+	off_t offset = 0;
+	ssize_t maxSize =0;
+
+	vfd = open(vaultFile,O_RDONLY);
+	if (vfd < 0)
+	{
+		printf("Error opening file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100,SEEK_SET);
+
+	while (cur < cat->maxDataSize)
+	{
+		len = read(vfd,buffer,1024);
+		if (len < 0)
+			return -1;
+		for (i=0;i<len;i++)
+		{
+			if (inFile==0)
+			{
+				if (buffer[i] == '<')
+				{
+					for (j=i+1;j<i+8;j++)
+					{
+						if (buffer[j] != '<')
+							break;
+					}
+					if (j == i+8)
+					{
+						maxSize = cur - offset;
+						if (maxSize >= fileStat.st_size+BORDERS_SIZE)
+						{
+							close(vfd);
+							return offset;
+						}
+						inFile=1;
+					}
+				}
+			}
+			else
+			{
+				if (buffer[i] == '>')
+				{
+					for (j=i+1;j<i+8;j++)
+					{
+						if (buffer[j] != '>')
+							break;
+					}
+					if (j == i+8)
+					{
+						offset = cur+8;
+						inFile=0;
+						cur+=7;
+						i+=7;
+					}
+				}
+			}
+
+			cur++;
+		}
+	}
+	close(vfd);
+	if ((inFile == 0) && ((cur - offset) >= fileStat.st_size+BORDERS_SIZE))
+		return offset;
+	return -1;
+}
+
 int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 {
 
+	//TODO: dont allow more than 100 files!
 	//TODO: dont allow duplicate files!
 	int i;
 	off_t startOffset = 0;
@@ -253,26 +326,17 @@ int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 		return -1;
 	}
 
-	for (i=0;i<c->numOfFiles;i++)
-	{
-		if (c->files[i].block1 + c->files[i].block1Len+ BORDERS_SIZE > startOffset)
-			startOffset = c->files[i].block1 + c->files[i].block1Len+ BORDERS_SIZE;
-		if (c->files[i].block2 + c->files[i].block2Len+ BORDERS_SIZE > startOffset)
-			startOffset = c->files[i].block2 + c->files[i].block2Len+ BORDERS_SIZE;
-		if (c->files[i].block3 + c->files[i].block3Len+ BORDERS_SIZE > startOffset)
-			startOffset = c->files[i].block3 + c->files[i].block3Len+ BORDERS_SIZE;
-	}
+	startOffset = findSpace1Block(vaultFile,fileStat,c);
 
-	if (startOffset + fileStat.st_size + BORDERS_SIZE < c->maxDataSize)
+	if (startOffset >= 0)
 	{
 		if (insertData1Block(vaultFile,c,fileToAdd,startOffset,fileStat) < 0)
-		{
 			return -1;
-		}
 		return 0;
 	}
 
-	printf("cant put the file at the end!\n");
+
+	printf("cant put the file in end!\n");
 
 	return -1;
 }
@@ -311,9 +375,15 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 	{
 		len = read(fd,buffer,bufferSize);
 		if (len < 0)
+		{
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+			write(vfd,"00000000",8);
 			return -1;
+		}
 		if (write(vfd,buffer,len) < 0)
 		{
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+			write(vfd,"00000000",8);
 			return -1;
 		}
 		readBytes += len;
@@ -321,6 +391,8 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 
 	if (write(vfd,RIGHT_BORDER,8) < 0)
 	{
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+		write(vfd,"00000000",8);
 		return -1;
 	}
 
