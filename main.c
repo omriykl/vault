@@ -375,10 +375,10 @@ struct offsetsAndSizes findSpace(char* vaultFile,struct stat fileStat,struct cat
 int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 {
 
-	//TODO: dont allow more than 100 files!
-	//TODO: dont allow duplicate files!
 	struct offsetsAndSizes offAndSizes;
 	struct stat fileStat;
+	int i;
+
 	if (stat(fileToAdd,&fileStat) < 0)
 	{
 		printf("error reading file %s\n",fileToAdd);
@@ -388,6 +388,20 @@ int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 	{
 		printf("No free space available.\n");
 		return -1;
+	}
+	if (c->numOfFiles >=100)
+	{
+		printf("No free space available.\n");
+		return -1;
+	}
+
+	for (i=0;i<c->numOfFiles;i++)
+	{
+		if (strcmp(c->files[i].name,basename(fileToAdd))== 0)
+		{
+			printf("File already exists!\n");
+			return -1;
+		}
 	}
 
 	offAndSizes = findSpace(vaultFile,fileStat,c);
@@ -860,7 +874,7 @@ int printStatus(char* vaultFile, struct catalog* cat)
 	//printf("max len = %ld\n",cat->maxDataSize);
 
 	printf("Number of files:	%d\n",cat->numOfFiles);
-	printf("Total size:	%d\n",filesSize);
+	printf("Total size:	%dB\n",filesSize);
 	printf("Fragmentation ratio: %.1f\n",frag);
 	//printf("first in: %d, last in: %d, total size: %d, total gaps: %d,total size of vault: %d\n",startOffset,endOffset,filesSize,gapsSize,cat->totalSize);
 
@@ -882,6 +896,248 @@ void printElapsedTime(struct timeval start)
 
 	mtime = ((seconds) * 1000.0 + useconds/1000.0);
 	printf("Total time took: %.3lf MS\n",mtime);
+}
+
+int moveBlock(char* vault, off_t fileStart,off_t fileEnd, off_t lastFile)
+{
+	int vfd,fd,len;
+	char buffer[1024];
+	off_t cur = fileStart, readBytes =0;
+	off_t blockSize= fileEnd -fileStart+1;
+
+	fileEnd++;
+
+	if (lastFile == 0)
+		lastFile = -1;
+
+	vfd = open(vault,O_RDWR);
+	if (vfd < 0)
+	{
+		printf("Error opening vault file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	fd = open("tmpVault.txt",O_RDWR|O_CREAT|O_TRUNC,0644);
+	if (fd < 0)
+	{
+		printf("Error opening file to write to: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + fileStart,SEEK_SET);
+
+	while (cur < fileEnd)
+	{
+		if (fileEnd - cur < 1024)
+			len = read(vfd,buffer,fileEnd-cur);
+		else
+			len = read(vfd,buffer,1024);
+
+		printf("the len is: %d, beffer is: %s\n",len,buffer);
+
+		if (len < 0)
+			return -1;
+
+		if (write(fd,buffer,len) < 0)
+		{
+			return -1;
+		}
+		cur+=len;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + fileStart,SEEK_SET);
+
+	if (write(vfd,"00000000",8) < 0)
+	{
+		printf("Error writing to vault file: %s\n", strerror(errno));
+		return -1;
+	}
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + fileEnd-8,SEEK_SET);
+	if (write(vfd,"00000000",8) < 0)
+	{
+		printf("Error writing to vault file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + lastFile+1,SEEK_SET);
+	lseek(fd,0,SEEK_SET);
+
+	while (readBytes < blockSize)
+	{
+		if (1024 > blockSize - readBytes)
+			len = read(fd,buffer,blockSize - readBytes);
+		else
+			len = read(fd,buffer,1024);
+		if (len < 0)
+		{
+			return -1;
+		}
+		if (write(vfd,buffer,len) < 0)
+		{
+			return -1;
+		}
+		readBytes += len;
+	}
+
+	close(vfd);
+	close(fd);
+
+	return 0;
+
+}
+
+int findFileAndmoveBlock(char* vault,struct catalog* cat, off_t fileStart, off_t fileEnd, off_t lastFileEnd)
+{
+	int i,found=0,vfd;
+
+	for (i=0;i<cat->numOfFiles;i++)
+	{
+		if (cat->files[i].block1 == fileStart)
+		{
+			if (moveBlock(vault,fileStart,fileEnd,lastFileEnd) < 0)
+			{
+				return -1;
+			}
+
+			cat->files[i].block1 = (lastFileEnd == 0) ? 0 : lastFileEnd+1;
+			found =1;
+			break;
+		}
+		else if (cat->files[i].block2 == fileStart)
+		{
+			if (moveBlock(vault,fileStart,fileEnd,lastFileEnd) < 0)
+			{
+				return -1;
+			}
+			cat->files[i].block2 = (lastFileEnd == 0) ? 0 : lastFileEnd+1;
+			found =1;
+			break;
+		}
+		else if (cat->files[i].block3 == fileStart)
+		{
+			if (moveBlock(vault,fileStart,fileEnd,lastFileEnd) < 0)
+			{
+				return -1;
+			}
+			cat->files[i].block3 = (lastFileEnd == 0) ? 0 : lastFileEnd+1;
+			found =1;
+			break;
+		}
+	}
+	if (found ==1)
+	{
+		vfd = open(vault,O_RDWR);
+		if (vfd < 0)
+		{
+			printf("Error opening vault file: %s\n", strerror(errno));
+			return -1;
+		}
+
+		lseek(vfd,0,SEEK_SET);
+
+		//writing the catalog data
+		if (write(vfd,cat,sizeof(struct catalog)) < 0)
+		{
+			printf("Error writing to file: %s\n", strerror(errno));
+			return -1;
+		}
+
+		//writing the fileTable
+		if (write(vfd,cat->files,sizeof(struct fileMetaData)*100) < 0)
+		{
+			printf("Error writing to file: %s\n", strerror(errno));
+			return -1;
+		}
+
+		return 0;
+	}
+	return -1;
+
+
+}
+
+int defrag(char* vaultFile,struct catalog* cat)
+{
+	int vfd,len,i,j,inFile = 0;
+	off_t cur=0,lastFileEnd=0,moveFileStart=-1,moveFileEnd=-1;
+	char buffer[1024];
+
+	vfd = open(vaultFile,O_RDONLY);
+	if (vfd < 0)
+	{
+		printf("Error opening vault file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100,SEEK_SET);
+
+	while (cur < cat->maxDataSize)
+	{
+		len = read(vfd,buffer,1024);
+		if (len < 0)
+			return -1;
+
+		for (i=0;i<len;i++)
+		{
+			if (inFile==0)
+			{
+				if (buffer[i] == '<')
+				{
+					for (j=i+1;j<i+8;j++)
+					{
+						if (buffer[j] != '<')
+							break;
+					}
+					if (j == i+8)
+					{
+						printf("file in %ld\n",cur);
+						if (cur - lastFileEnd > 1)
+						{
+							moveFileStart = cur;
+						}
+						inFile=1;
+					}
+				}
+			}
+			else
+			{
+				if (buffer[i] == '>')
+				{
+					for (j=i+1;j<i+8;j++)
+					{
+						if (buffer[j] != '>')
+							break;
+					}
+					if (j == i+8)
+					{
+						if (moveFileStart > 0)
+						{
+							moveFileEnd=cur+7;
+							findFileAndmoveBlock(vaultFile,cat,moveFileStart,moveFileEnd,lastFileEnd);
+							close(vfd);
+
+							return 1;
+						}
+						else
+						{
+							cur+=7;
+							i+=7;
+						}
+						inFile=0;
+						lastFileEnd = cur;
+						moveFileStart = -1;
+					}
+				}
+			}
+
+			cur++;
+
+		}
+
+	}
+
+	close(vfd);
+	return 0;
 }
 
 int main(int argc, char** argv)
@@ -928,6 +1184,7 @@ int main(int argc, char** argv)
 	{
 		struct catalog *cat;
 		int i;
+		ssize_t fileSize;
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
 		{
@@ -940,9 +1197,19 @@ int main(int argc, char** argv)
 		{
 			for (i=0;i<cat->numOfFiles;i++)
 			{
-				//TODO: delete the block1 display
-				//TODO: display insertion in human date
-				printf("%s	%dB 	%d	%d	%ld\n",cat->files[i].name,cat->files[i].size,cat->files[i].protection,cat->files[i].insertion, cat->files[i].block1);
+				if (cat->files[i].size < 1024)
+				{
+					printf("%s	%dB 	%o	%s\n",cat->files[i].name,cat->files[i].size,cat->files[i].protection,ctime(&cat->files[i].insertion));
+				}
+				else if (cat->files[i].size < 1024*1024)
+				{
+					printf("%s	%dK 	%o	%s\n",cat->files[i].name,cat->files[i].size /1024,cat->files[i].protection,ctime(&cat->files[i].insertion));
+				}
+				else if (cat->files[i].size < 1024*1024*1024)
+				{
+					printf("%s	%dM 	%o	%s\n",cat->files[i].name,cat->files[i].size /1024*1024,cat->files[i].protection,ctime(&cat->files[i].insertion));
+				}
+
 			}
 		}
 
@@ -1082,6 +1349,32 @@ int main(int argc, char** argv)
 		{
 			printElapsedTime(start);
 			return -1;
+		}
+
+		printElapsedTime(start);
+
+		return 0;
+	}
+	else if (strcmp(argv[2],"defrag") == 0)
+	{
+		struct catalog *cat;
+		int defResult;
+
+		if (getVaultFromFile(argv[1],&cat) < 0)
+		{
+			printElapsedTime(start);
+			return -1;
+		}
+
+		defResult = defrag(argv[1],cat);
+		if (defResult < 0)
+		{
+			printElapsedTime(start);
+			return -1;
+		}
+		while(defResult == 1)
+		{
+			defResult = defrag(argv[1],cat);
 		}
 
 		printElapsedTime(start);
