@@ -42,6 +42,12 @@ struct catalog
 	struct fileMetaData* files;
 };
 
+struct offsetsAndSizes
+{
+	ssize_t* blocks;
+	off_t* offsets;
+};
+
 
 
 int createVault(char* filename,ssize_t sizeInBytes)
@@ -56,9 +62,6 @@ int createVault(char* filename,ssize_t sizeInBytes)
 
 	c = (struct catalog *) malloc(sizeof(struct catalog));
 	files = (struct fileMetaData *) calloc(sizeof(struct fileMetaData),100);
-
-	for (i=0;i<100;i++)
-		files[i].size = i;
 
 	gettimeofday(&tv, NULL);
 
@@ -235,18 +238,56 @@ long long getBytesFromStr(char* str)
 		return -1;
 }
 
-int findSpace1Block(char* vaultFile,struct stat fileStat,struct catalog* cat)
+void addToPQ(ssize_t** blocks,off_t** offsets,ssize_t newVal, off_t newOff)
+{
+	if ((*blocks)[0] <= newVal)
+	{
+		(*blocks)[2] = (*blocks)[1];
+		(*blocks)[1] = (*blocks)[0];
+		(*blocks)[0] = newVal;
+
+		(*offsets)[2] = (*offsets)[1];
+		(*offsets)[1] = (*offsets)[0];
+		(*offsets)[0] = newOff;
+	}
+	else if ((*blocks)[1] <= newVal)
+	{
+		(*blocks)[2] = (*blocks)[1];
+		(*blocks)[1] = newVal;
+
+		(*offsets)[2] = (*offsets)[1];
+		(*offsets)[1] = newOff;
+	}
+	else if ((*blocks)[0] <= newVal)
+	{
+		(*blocks)[0] = newVal;
+
+		(*offsets)[0] = newOff;
+	}
+}
+
+struct offsetsAndSizes findSpace(char* vaultFile,struct stat fileStat,struct catalog* cat)
 {
 	int vfd,cur=0,len,i,j,inFile=0;
 	char buffer[1024];
 	off_t offset = 0;
-	ssize_t maxSize =0;
+	//TODO: check allocation
+	ssize_t* blocks = (ssize_t*)calloc(3, sizeof(ssize_t));
+	off_t* offsets = (off_t*)calloc(3, sizeof(off_t));
+	offsets[0]= -1;
+	offsets[1]= -1;
+	offsets[2]= -1;
+
+	struct offsetsAndSizes offAndSizes;
+	offAndSizes.blocks = blocks;
+	offAndSizes.offsets = offsets;
+
 
 	vfd = open(vaultFile,O_RDONLY);
 	if (vfd < 0)
 	{
 		printf("Error opening file: %s\n", strerror(errno));
-		return -1;
+		return offAndSizes;
 	}
 
 	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100,SEEK_SET);
@@ -255,7 +296,7 @@ int findSpace1Block(char* vaultFile,struct stat fileStat,struct catalog* cat)
 	{
 		len = read(vfd,buffer,1024);
 		if (len < 0)
-			return -1;
+			return offAndSizes;
 		for (i=0;i<len;i++)
 		{
 			if (inFile==0)
@@ -269,11 +310,14 @@ int findSpace1Block(char* vaultFile,struct stat fileStat,struct catalog* cat)
 					}
 					if (j == i+8)
 					{
-						maxSize = cur - offset;
-						if (maxSize >= fileStat.st_size+BORDERS_SIZE)
+						addToPQ(&blocks,&offsets,cur-offset,offset);
+						if (blocks[0] >= fileStat.st_size+BORDERS_SIZE)
 						{
+							offsets[1] = -1;
+							offsets[2] = -1;
+
 							close(vfd);
-							return offset;
+							return offAndSizes;
 						}
 						inFile=1;
 					}
@@ -302,9 +346,31 @@ int findSpace1Block(char* vaultFile,struct stat fileStat,struct catalog* cat)
 		}
 	}
 	close(vfd);
-	if ((inFile == 0) && ((cur - offset) >= fileStat.st_size+BORDERS_SIZE))
-		return offset;
-	return -1;
+
+	if (inFile == 0)
+		addToPQ(&blocks,&offsets,cur-offset,offset);
+
+	if (blocks[0] >= fileStat.st_size+BORDERS_SIZE)
+	{
+		offsets[1] = -1;
+		offsets[2] = -1;
+		return offAndSizes;
+	}
+	else if (blocks[0] + blocks[1] >= fileStat.st_size+(BORDERS_SIZE)*2)
+	{
+		offsets[2] = -1;
+		return offAndSizes;
+	}
+	else if (blocks[0] + blocks[1] + blocks[3] >= fileStat.st_size+(BORDERS_SIZE)*3)
+	{
+		return offAndSizes;
+	}
+
+	offsets[0] = -1;
+	offsets[1] = -1;
+	offsets[2] = -1;
+
+	return offAndSizes;
 }
 
 int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
@@ -312,8 +378,7 @@ int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 
 	//TODO: dont allow more than 100 files!
 	//TODO: dont allow duplicate files!
-	int i;
-	off_t startOffset = 0;
+	struct offsetsAndSizes offAndSizes;
 	struct stat fileStat;
 	if (stat(fileToAdd,&fileStat) < 0)
 	{
@@ -326,27 +391,30 @@ int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 		return -1;
 	}
 
-	startOffset = findSpace1Block(vaultFile,fileStat,c);
+	offAndSizes = findSpace(vaultFile,fileStat,c);
 
-	if (startOffset >= 0)
+	printf("[%ld,%ld,%ld]\n",offAndSizes.offsets[0],offAndSizes.offsets[1],offAndSizes.offsets[2]);
+	printf("[%ld,%ld,%ld]\n",offAndSizes.blocks[0],offAndSizes.blocks[1],offAndSizes.blocks[2]);
+
+	if (offAndSizes.offsets[0] >= 0)
 	{
-		if (insertData1Block(vaultFile,c,fileToAdd,startOffset,fileStat) < 0)
+		if (insertData(vaultFile,c,fileToAdd,offAndSizes,fileStat) < 0)
 			return -1;
 		return 0;
 	}
 
-
-	printf("cant put the file in end!\n");
+	printf("cant insert the file in less than 4 parts!\n");
 
 	return -1;
 }
 
-int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t startOffset, struct stat fileStat)
+int insertData(char* vaultFile,struct catalog* c, char* fileToAdd, struct offsetsAndSizes offAndSizes, struct stat fileStat)
 {
 	struct timeval tv;
-	int fd,vfd;
+	int fd,vfd,numOfBlocks = 1;
 	ssize_t readBytes = 0;
 	ssize_t bufferSize = 1024;
+	ssize_t blockSize,blockSize1,blockSize2;
 	char buffer[1024];
 	int len;
 
@@ -364,25 +432,33 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 		return -1;
 	}
 
-	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+	lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[0],SEEK_SET);
 
 	if (write(vfd,LEFT_BORDER,8) < 0)
 	{
 		return -1;
 	}
 
-	while (readBytes < fileStat.st_size)
+	if (offAndSizes.offsets[1] == -1 && offAndSizes.offsets[2] == -1)
+		blockSize = fileStat.st_size;
+	else
+		blockSize = offAndSizes.blocks[0] - BORDERS_SIZE;
+
+	while (readBytes < blockSize)
 	{
-		len = read(fd,buffer,bufferSize);
+		if (bufferSize > blockSize - readBytes)
+			len = read(fd,buffer,blockSize - readBytes);
+		else
+			len = read(fd,buffer,bufferSize);
 		if (len < 0)
 		{
-			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[0],SEEK_SET);
 			write(vfd,"00000000",8);
 			return -1;
 		}
 		if (write(vfd,buffer,len) < 0)
 		{
-			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[0],SEEK_SET);
 			write(vfd,"00000000",8);
 			return -1;
 		}
@@ -391,18 +467,119 @@ int insertData1Block(char* vaultFile,struct catalog* c, char* fileToAdd, off_t s
 
 	if (write(vfd,RIGHT_BORDER,8) < 0)
 	{
-		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + startOffset,SEEK_SET);
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[0],SEEK_SET);
 		write(vfd,"00000000",8);
 		return -1;
 	}
 
+	if (offAndSizes.offsets[1] >= 0)
+	{
+		numOfBlocks++;
+		readBytes=0;
+
+		if (offAndSizes.offsets[2] == -1)
+			blockSize1 = fileStat.st_size - blockSize;
+		else
+			blockSize1 = offAndSizes.blocks[1] - BORDERS_SIZE;
+
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[1],SEEK_SET);
+
+		if (write(vfd,LEFT_BORDER,8) < 0)
+		{
+			return -1;
+		}
+
+		while (readBytes < blockSize1)
+		{
+			if (bufferSize > blockSize1 - readBytes)
+				len = read(fd,buffer,blockSize1 - readBytes);
+			else
+				len = read(fd,buffer,bufferSize);
+			if (len < 0)
+			{
+				lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[1],SEEK_SET);
+				write(vfd,"00000000",8);
+				return -1;
+			}
+			if (write(vfd,buffer,len) < 0)
+			{
+				lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[1],SEEK_SET);
+				write(vfd,"00000000",8);
+				return -1;
+			}
+			readBytes += len;
+		}
+
+		if (write(vfd,RIGHT_BORDER,8) < 0)
+		{
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[1],SEEK_SET);
+			write(vfd,"00000000",8);
+			return -1;
+		}
+	}
+
+	if (offAndSizes.offsets[2] >= 0)
+	{
+		numOfBlocks++;
+
+		readBytes=0;
+
+		blockSize2 = fileStat.st_size - blockSize - blockSize1;
+
+		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[2],SEEK_SET);
+
+		if (write(vfd,LEFT_BORDER,8) < 0)
+		{
+			return -1;
+		}
+
+		while (readBytes < blockSize2)
+		{
+			if (bufferSize > blockSize2 - readBytes)
+				len = read(fd,buffer,blockSize2 - readBytes);
+			else
+				len = read(fd,buffer,bufferSize);
+			if (len < 0)
+			{
+				lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[2],SEEK_SET);
+				write(vfd,"00000000",8);
+				return -1;
+			}
+			if (write(vfd,buffer,len) < 0)
+			{
+				lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[2],SEEK_SET);
+				write(vfd,"00000000",8);
+				return -1;
+			}
+			readBytes += len;
+		}
+
+		if (write(vfd,RIGHT_BORDER,8) < 0)
+		{
+			lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + offAndSizes.offsets[2],SEEK_SET);
+			write(vfd,"00000000",8);
+			return -1;
+		}
+
+	}
+
 	gettimeofday(&tv, NULL);
 
-	c->availableSpace -= fileStat.st_size + BORDERS_SIZE;
+	c->availableSpace -= fileStat.st_size + BORDERS_SIZE*numOfBlocks;
 	c->numOfFiles +=1;
 	c->lastMod = tv.tv_sec;
-	c->files[c->numOfFiles -1].block1 = startOffset;
-	c->files[c->numOfFiles -1].block1Len = fileStat.st_size;
+	c->files[c->numOfFiles -1].block1 = offAndSizes.offsets[0];
+	c->files[c->numOfFiles -1].block1Len = blockSize;
+	if (offAndSizes.offsets[1] >=0)
+	{
+		c->files[c->numOfFiles -1].block2 = offAndSizes.offsets[1];
+		c->files[c->numOfFiles -1].block2Len = blockSize1;
+	}
+	if (offAndSizes.offsets[2] >=0)
+	{
+		c->files[c->numOfFiles -1].block3 = offAndSizes.offsets[2];
+		c->files[c->numOfFiles -1].block3Len = blockSize2;
+	}
 	c->files[c->numOfFiles -1].insertion = tv.tv_sec;
 	strcpy(c->files[c->numOfFiles -1].name,basename(fileToAdd));
 	c->files[c->numOfFiles -1].protection = fileStat.st_mode;
@@ -515,7 +692,7 @@ int fetchFileFromVault(char* vaultFile, struct fileMetaData file)
 
 int deleteFile(char* vaultFile, struct fileMetaData file,int fileIndex, struct catalog* cat)
 {
-	int i,vfd;
+	int i,vfd,numOfBlocks=1;
 	struct timeval tv;
 
 	vfd = open(vaultFile,O_RDWR);
@@ -540,6 +717,8 @@ int deleteFile(char* vaultFile, struct fileMetaData file,int fileIndex, struct c
 
 	if (file.block2Len > 0)
 	{
+		numOfBlocks++;
+
 		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + file.block2,SEEK_SET);
 		if (write(vfd,"00000000",8) < 0)
 		{
@@ -556,6 +735,8 @@ int deleteFile(char* vaultFile, struct fileMetaData file,int fileIndex, struct c
 
 	if (file.block3Len > 0)
 	{
+		numOfBlocks++;
+
 		lseek(vfd,sizeof(struct catalog)+ sizeof(struct fileMetaData)*100 + file.block3,SEEK_SET);
 		if (write(vfd,"00000000",8) < 0)
 		{
@@ -578,7 +759,7 @@ int deleteFile(char* vaultFile, struct fileMetaData file,int fileIndex, struct c
 
 	gettimeofday(&tv, NULL);
 
-	cat->availableSpace += file.size+BORDERS_SIZE;
+	cat->availableSpace += file.size+BORDERS_SIZE*numOfBlocks;
 	cat->numOfFiles--;
 	cat->lastMod = tv.tv_sec;
 
@@ -678,10 +859,13 @@ int printStatus(char* vaultFile, struct catalog* cat)
 	gapsSize = (endOffset - startOffset) - filesSize;
 	frag= gapsSize*1.0 / (endOffset - startOffset);
 
+	printf("avail space = %ld\n",cat->availableSpace);
+	printf("max len = %ld\n",cat->maxDataSize);
+
 	printf("Number of files:	%d\n",cat->numOfFiles);
 	printf("Total size:	%d\n",filesSize);
 	printf("Fragmentation ratio: %.1f\n",frag);
-	//printf("first in: %d, last in: %d, total size: %d, total gaps: %d,total size of vault: %d\n",startOffset,endOffset,filesSize,gapsSize,cat->totalSize);
+	printf("first in: %d, last in: %d, total size: %d, total gaps: %d,total size of vault: %d\n",startOffset,endOffset,filesSize,gapsSize,cat->totalSize);
 
 	close(vfd);
 
