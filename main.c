@@ -58,7 +58,6 @@ int createVault(char* filename,ssize_t sizeInBytes)
 	char* data;
 	ssize_t dataSize;
 	int fd;
-	int i;
 
 	c = (struct catalog *) malloc(sizeof(struct catalog));
 	files = (struct fileMetaData *) calloc(sizeof(struct fileMetaData),100);
@@ -258,11 +257,11 @@ void addToPQ(ssize_t** blocks,off_t** offsets,ssize_t newVal, off_t newOff)
 		(*offsets)[2] = (*offsets)[1];
 		(*offsets)[1] = newOff;
 	}
-	else if ((*blocks)[0] <= newVal)
+	else if ((*blocks)[2] <= newVal)
 	{
-		(*blocks)[0] = newVal;
+		(*blocks)[2] = newVal;
 
-		(*offsets)[0] = newOff;
+		(*offsets)[2] = newOff;
 	}
 }
 
@@ -393,8 +392,8 @@ int addFile(char* vaultFile,struct catalog* c, char* fileToAdd)
 
 	offAndSizes = findSpace(vaultFile,fileStat,c);
 
-	printf("[%ld,%ld,%ld]\n",offAndSizes.offsets[0],offAndSizes.offsets[1],offAndSizes.offsets[2]);
-	printf("[%ld,%ld,%ld]\n",offAndSizes.blocks[0],offAndSizes.blocks[1],offAndSizes.blocks[2]);
+	//printf("[%ld,%ld,%ld]\n",offAndSizes.offsets[0],offAndSizes.offsets[1],offAndSizes.offsets[2]);
+	//printf("[%ld,%ld,%ld]\n",offAndSizes.blocks[0],offAndSizes.blocks[1],offAndSizes.blocks[2]);
 
 	if (offAndSizes.offsets[0] >= 0)
 	{
@@ -788,10 +787,8 @@ int deleteFile(char* vaultFile, struct fileMetaData file,int fileIndex, struct c
 int printStatus(char* vaultFile, struct catalog* cat)
 {
 	int vfd,len;
-	int startOffset,endOffset,tempStart,tempEnd,totalSize=0,cur=0,i,j,found=0;
-	char borderBuffer[7];
+	int startOffset,endOffset,cur=0,i,j,found=0;
 	char buffer[1024];
-	char oneByte;
 	int gapsSize = 0;
 	int filesSize=0;
 	float frag = 0.0;
@@ -859,24 +856,44 @@ int printStatus(char* vaultFile, struct catalog* cat)
 	gapsSize = (endOffset - startOffset) - filesSize;
 	frag= gapsSize*1.0 / (endOffset - startOffset);
 
-	printf("avail space = %ld\n",cat->availableSpace);
-	printf("max len = %ld\n",cat->maxDataSize);
+	//printf("avail space = %ld\n",cat->availableSpace);
+	//printf("max len = %ld\n",cat->maxDataSize);
 
 	printf("Number of files:	%d\n",cat->numOfFiles);
 	printf("Total size:	%d\n",filesSize);
 	printf("Fragmentation ratio: %.1f\n",frag);
-	printf("first in: %d, last in: %d, total size: %d, total gaps: %d,total size of vault: %d\n",startOffset,endOffset,filesSize,gapsSize,cat->totalSize);
+	//printf("first in: %d, last in: %d, total size: %d, total gaps: %d,total size of vault: %d\n",startOffset,endOffset,filesSize,gapsSize,cat->totalSize);
 
 	close(vfd);
 
 	return 0;
 }
 
+void printElapsedTime(struct timeval start)
+{
+	struct timeval end;
+	long seconds, useconds;
+	double mtime;
+
+	gettimeofday(&end,NULL);
+
+	seconds = end.tv_sec -start.tv_sec;
+	useconds = end.tv_usec - start.tv_usec;
+
+	mtime = ((seconds) * 1000.0 + useconds/1000.0);
+	printf("Total time took: %.3lf MS\n",mtime);
+}
+
 int main(int argc, char** argv)
 {
+	struct timeval start;
+
+	gettimeofday(&start,NULL);
+
 	if (argc < 3)
 	{
 		printf("Invalid operation!\n");
+		printElapsedTime(start);
 		return -1;
 	}
 	lowerStr(&argv[2]);
@@ -886,19 +903,25 @@ int main(int argc, char** argv)
 		if (argc != 4)
 		{
 			printf("Invalid parameters for init operation!\n");
+			printElapsedTime(start);
 			return -1;
 		}
 		ssize_t size = getBytesFromStr(argv[3]);
 		if (size < 0)
 		{
 			printf("Invalid parameters for init operation!\n");
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (createVault(argv[1],size) < 0)
+		{
+			printElapsedTime(start);
 			return -1;
+		}
 
 		printf("Created.\n");
+		printElapsedTime(start);
 		return 0;
 	}
 	else if (strcmp(argv[2],"list") == 0)
@@ -907,16 +930,23 @@ int main(int argc, char** argv)
 		int i;
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
+		{
+			printElapsedTime(start);
 			return -1;
+		}
 		if (cat->numOfFiles == 0)
 			printf("The vault is empty.\n");
 		else
 		{
 			for (i=0;i<cat->numOfFiles;i++)
 			{
-				printf("%s	%dB 	%d	%d	%d\n",cat->files[i].name,cat->files[i].size,cat->files[i].protection,cat->files[i].insertion, cat->files[i].block1);
+				//TODO: delete the block1 display
+				//TODO: display insertion in human date
+				printf("%s	%dB 	%d	%d	%ld\n",cat->files[i].name,cat->files[i].size,cat->files[i].protection,cat->files[i].insertion, cat->files[i].block1);
 			}
 		}
+
+		printElapsedTime(start);
 
 		return 0;
 	}
@@ -927,19 +957,23 @@ int main(int argc, char** argv)
 		if (argc != 4)
 		{
 			printf("Invalid parameters for add operation!\n");
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
 		{
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (addFile(argv[1],cat,argv[3]) < 0)
 		{
+			printElapsedTime(start);
 			return -1;
 		}
 		printf("File added!\n");
+		printElapsedTime(start);
 		return 0;
 
 	}
@@ -951,17 +985,20 @@ int main(int argc, char** argv)
 		if (argc != 4)
 		{
 			printf("Invalid parameters for fetch operation!\n");
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
 		{
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (cat->numOfFiles == 0)
 		{
 			printf("File %s was not found!\n",argv[3]);
+			printElapsedTime(start);
 			return -1;
 		}
 
@@ -972,14 +1009,17 @@ int main(int argc, char** argv)
 				if (fetchFileFromVault(argv[1],cat->files[i]) < 0)
 				{
 					printf("error fetching file.\n");
+					printElapsedTime(start);
 					return -1;
 				}
 				printf("%s created.\n",argv[3]);
+				printElapsedTime(start);
 				return 0;
 			}
 		}
 
 		printf("File %s was not found!\n",argv[3]);
+		printElapsedTime(start);
 		return -1;
 	}
 	else if (strcmp(argv[2],"rm") == 0)
@@ -990,17 +1030,20 @@ int main(int argc, char** argv)
 		if (argc != 4)
 		{
 			printf("Invalid parameters for rm operation!\n");
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
 		{
+			printElapsedTime(start);
 			return -1;
 		}
 
 		if (cat->numOfFiles == 0)
 		{
 			printf("File %s was not found!\n",argv[3]);
+			printElapsedTime(start);
 			return -1;
 		}
 
@@ -1011,106 +1054,47 @@ int main(int argc, char** argv)
 				if (deleteFile(argv[1],cat->files[i],i,cat) < 0)
 				{
 					printf("error deleting file.\n");
+					printElapsedTime(start);
 					return -1;
 				}
 				printf("%s deleted.\n",argv[3]);
+				printElapsedTime(start);
 				return 0;
 			}
 		}
 
 		printf("File %s was not found!\n",argv[3]);
+		printElapsedTime(start);
 		return -1;
 
 	}
 	else if (strcmp(argv[2],"status") == 0)
 	{
 		struct catalog *cat;
-		int i;
 
 		if (getVaultFromFile(argv[1],&cat) < 0)
+		{
+			printElapsedTime(start);
 			return -1;
+		}
 
 		if (printStatus(argv[1],cat) < 0)
+		{
+			printElapsedTime(start);
 			return -1;
+		}
+
+		printElapsedTime(start);
 
 		return 0;
 	}
-
-	struct catalog *cat;
-	char* data;
-
-	createVault("boom.vlt",1024*1024*2);
-	getVaultFromFile("boom.vlt",&cat);
-
-	printf("%d %d %d %d %d %d\n\n",cat->created,cat->lastMod,cat->numOfFiles,cat->totalSize,cat->files[0].size,cat->files[1].size);
+	else
+	{
+		printf("Invalid operation!\n");
+		printElapsedTime(start);
+		return -1;
+	}
 
 
-//	struct timeval stop, tv;
-//	double mtime;
-//
-//	gettimeofday(&tv, NULL);
-//
-//	mtime = (tv.tv_sec) * 1000.0 + (tv.tv_usec) / 1000.0 ;
-//
-//	time_t t = (tv.tv_sec);
-//
-//	printf("took %d\n", t);
-//
-//	printf("%d\n",sizeof(struct catalog));
-//	struct catalog *c;
-//	struct catalog *c2;
-//	struct fileMetaData *files;
-//	struct fileMetaData *filesBack;
-//
-//	c = (struct catalog *) malloc(sizeof(struct catalog)+1);
-//
-//	files = (struct fileMetaData *) malloc((sizeof(struct fileMetaData)+1)*100);
-//
-//	files[22].size = 500;
-//
-//	c->created = 5;
-//	c->lastMod = 6;
-//	c->numOfFiles = 10;
-//	c->totalSize = 104;
-//	c->files = files;
-//
-//	printf("%d %d %d %d %d\n",c->created,c->lastMod,c->numOfFiles,c->totalSize,c->files[22].size);
-//
-//	int fd = open("a.vlt",O_RDWR|O_CREAT|O_TRUNC,0777);
-//	if (fd < 0)
-//	{
-//		printf("Error writing to file: %s\n", strerror(errno));
-//		return -1;
-//	}
-//
-//	if (write(fd,c,sizeof(struct catalog)) < 0)
-//	{
-//		printf("error!");
-//		return 0;
-//	}
-//
-//	if (write(fd,files,sizeof(struct fileMetaData)*100) < 0)
-//	{
-//		printf("error!");
-//		return 0;
-//	}
-//
-//	close(fd);
-//
-//	fd = open("a.vlt",O_RDONLY);
-//	c2 = (struct catalog *) malloc(sizeof(struct catalog));
-//	filesBack = (struct fileMetaData *) malloc(sizeof(struct fileMetaData)*100);
-//
-//	printf("%d\n",filesBack[0].size);
-//
-//	read(fd,c2,sizeof(struct catalog)+1);
-//	read(fd,filesBack,(sizeof(struct fileMetaData)*100)+1);
-//
-//	c2->files = filesBack;
-//
-//	printf("%d\n",filesBack[0].size);
-//
-//	printf("%d %d %d %d %d\n",c2->created,c2->lastMod,c2->numOfFiles,c2->totalSize,filesBack[22].size);
-
-	return 1;
+	return 0;
 }
